@@ -73,13 +73,13 @@ pub use wgpu_upstream::{
     TextureFormat, TextureUsage, TextureView as TextureViewHandle, TextureViewDescriptor,
     TextureViewDimension, VertexAttributeDescriptor, VertexBufferDescriptor, VertexFormat, 
     VertexStateDescriptor, BIND_BUFFER_ALIGNMENT, Operations, BufferAsyncError, TextureDataLayout, BufferSlice,
-    Instance, StencilStateDescriptor
+    Instance, StencilStateDescriptor, util::{self, BufferInitDescriptor}, ShaderModuleSource,
+    MapMode, BufferView,
 };
 
 pub fn shader_from_spirv_bytes(device: &wgpu_upstream::Device, bytes: &[u8]) -> wgpu_upstream::ShaderModule {
-    let cursor = std::io::Cursor::new(bytes);
-    let vs_spirv = device.create_shader_module(cursor);
-    device.create_shader_module(&vs_spirv)
+    let shader_module = util::make_spirv(bytes);
+    device.create_shader_module(shader_module)
 }
 
 /// The default power preference used for requesting the WGPU adapter.
@@ -98,7 +98,7 @@ pub fn clear_texture(
     encoder: &mut CommandEncoder,
 ) {
     RenderPassBuilder::new()
-        .color_attachment(texture, |builder| builder.clear_color(clear_color))
+        .color_attachment(texture, |builder| builder.load_op(LoadOp::Clear(clear_color)))
         .begin(encoder);
 }
 
@@ -139,7 +139,7 @@ pub fn resolve_texture(
 /// Shorthand for creating the pipeline layout from a slice of bind group layouts.
 pub fn create_pipeline_layout<'p>(
     device: &wgpu_upstream::Device,
-    label: &'p str,
+    label: Option<&'p str>,
     bind_group_layouts: &[&wgpu_upstream::BindGroupLayout],
     push_constant_ranges: &'p [wgpu_upstream::PushConstantRange],
 ) -> wgpu_upstream::PipelineLayout {
@@ -172,7 +172,7 @@ pub fn sampler_descriptor_clone<'a>(
 
 /// The functions within this module use unsafe in order to retrieve their input as a slice of
 /// bytes. This is necessary in order to upload data to the GPU via the wgpu
-/// `create_buffer_with_data` buffer constructor. This method is unsafe as the type `T` may contain
+/// `DeviceExt::create_buffer_init` buffer constructor. This method is unsafe as the type `T` may contain
 /// padding which is considered to be uninitialised memory in Rust and may potentially lead to
 /// undefined behaviour.
 ///

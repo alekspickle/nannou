@@ -24,7 +24,6 @@ pub struct AdapterMap {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AdapterMapKey {
     power_preference: wgpu::PowerPreference,
-    backends: wgpu::BackendBit,
 }
 
 /// A single active adapter and its map of connected devices.
@@ -72,9 +71,9 @@ impl AdapterMap {
     pub fn get_or_request<'a, 'b>(
         &'a self,
         options: wgpu::RequestAdapterOptions<'b>,
-        backends: wgpu::BackendBit,
+        instance: &'a wgpu::Instance
     ) -> Option<Arc<ActiveAdapter>> {
-        futures::executor::block_on(self.get_or_request_async(options, backends))
+        futures::executor::block_on(self.get_or_request_async(options, instance))
     }
 
     /// Request an adaptor with the given options.
@@ -87,21 +86,20 @@ impl AdapterMap {
     pub fn request<'a, 'b>(
         &'a self,
         options: wgpu::RequestAdapterOptions<'b>,
-        backends: wgpu::BackendBit,
+        instance: &'a wgpu::Instance
     ) -> Option<Arc<ActiveAdapter>> {
-        futures::executor::block_on(self.request_async(options, backends))
+        futures::executor::block_on(self.request_async(options, instance))
     }
 
     /// The async implementation of `get_or_request`.
     pub async fn get_or_request_async<'a, 'b>(
         &'a self,
         options: wgpu::RequestAdapterOptions<'b>,
-        backends: wgpu::BackendBit,
+        instance: &'a wgpu::Instance
     ) -> Option<Arc<ActiveAdapter>> {
         let power_preference = options.power_preference;
         let key = AdapterMapKey {
             power_preference,
-            backends,
         };
         let mut map = self
             .map
@@ -110,7 +108,7 @@ impl AdapterMap {
         if let Some(adapter) = map.get(&key) {
             return Some(adapter.clone());
         }
-        if let Some(adapter) = wgpu::Instance::new(backends)
+        if let Some(adapter) = instance
             .request_adapter(&options)
             .await
         {
@@ -128,9 +126,9 @@ impl AdapterMap {
     pub async fn request_async<'a, 'b>(
         &'a self,
         options: wgpu::RequestAdapterOptions<'b>,
-        backends: wgpu::BackendBit,
+        instance: &'b wgpu::Instance
     ) -> Option<Arc<ActiveAdapter>> {
-        let adapter = wgpu::Instance::new(backends)
+        let adapter = instance
             .request_adapter(&options)
             .await?;
         let device_map = Default::default();
@@ -141,7 +139,6 @@ impl AdapterMap {
         let power_preference = options.power_preference;
         let key = AdapterMapKey {
             power_preference,
-            backends,
         };
         let mut map = self
             .map
@@ -318,8 +315,7 @@ impl Eq for DeviceMapKey {}
 
 // NOTE: This should be updated as fields are added to the `wgpu::DeviceDescriptor` type.
 fn eq_device_descriptor(a: &wgpu::DeviceDescriptor, b: &wgpu::DeviceDescriptor) -> bool {
-    a.extensions.anisotropic_filtering == b.extensions.anisotropic_filtering
-        && a.limits.max_bind_groups == b.limits.max_bind_groups
+    a.features == b.features && a.limits == b.limits && a.shader_validation == b.shader_validation
 }
 
 // NOTE: This should be updated as fields are added to the `wgpu::DeviceDescriptor` type.
@@ -327,6 +323,7 @@ fn hash_device_descriptor<H>(desc: &wgpu::DeviceDescriptor, state: &mut H)
 where
     H: Hasher,
 {
-    desc.extensions.anisotropic_filtering.hash(state);
-    desc.limits.max_bind_groups.hash(state);
+    desc.features.hash(state);
+    desc.limits.hash(state);
+    desc.shader_validation.hash(state);
 }

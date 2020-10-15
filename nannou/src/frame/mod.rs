@@ -235,7 +235,6 @@ impl<'swap_chain> Frame<'swap_chain> {
             Some((_, ref msaa_texture_view)) => msaa_texture_view,
         };
         let resolve_target = None;
-        let clear_color = wgpu::Color::TRANSPARENT;
         wgpu::RenderPassColorAttachmentDescriptor {
             attachment,
             resolve_target,
@@ -302,7 +301,7 @@ impl RenderData {
             device,
             &intermediary_lin_srgba.texture_view,
             src_sample_count,
-            intermediary_lin_srgba.texture_view.component_type(),
+            intermediary_lin_srgba.texture_view.component_type().expect("Texture view has no component type?"),
             swap_chain_sample_count,
             swap_chain_format,
         );

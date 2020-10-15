@@ -4,6 +4,9 @@
 use crate::wgpu;
 use std::path::Path;
 
+use wgpu::util::{DeviceExt, BufferInitDescriptor};
+use wgpu::Extent3d;
+
 /// The set of pixel types from the image crate that can be loaded directly into a texture.
 ///
 /// The `Rgba8` and `Bgra8` color types are assumed to be non-linear sRGB.
@@ -20,17 +23,17 @@ pub trait Pixel: image::Pixel {
 pub struct BufferImage {
     color_type: image::ColorType,
     size: [u32; 2],
-    buffer: wgpu::BufferBytes,
+    buffer: wgpu::Buffer,
 }
 
 /// A wrapper around a slice of bytes representing an image.
 ///
 /// An `ImageReadMapping` may only be created by reading from a `BufferImage` returned by a
 /// `Texture::to_image` call.
-pub struct ImageReadMapping {
+pub struct ImageReadMapping<'buffer> {
     color_type: image::ColorType,
     size: [u32; 2],
-    // TODO(jhg): fix
+    view: wgpu::BufferView<'buffer>
 }
 
 impl wgpu::TextureBuilder {
@@ -192,7 +195,7 @@ impl wgpu::Texture {
     /// Pixel type compatibility is ensured via the `Pixel` trait.
     ///
     /// Returns `None` if there are no images in the given sequence.
-    pub fn load_array_from_image_buffers<'a, I, P, Container>(
+    pub fn load_3d_from_image_buffers<'a, I, P, Container>(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         usage: wgpu::TextureUsage,
@@ -204,7 +207,7 @@ impl wgpu::Texture {
         P: 'static + Pixel,
         Container: 'a + std::ops::Deref<Target = [P::Subpixel]>,
     {
-        load_texture_array_from_image_buffers(device, queue, usage, buffers)
+        load_3d_texture_from_image_buffers(device, queue, usage, buffers)
     }
 
     /// Encode the necessary commands to load a texture directly from a dynamic image.
@@ -249,11 +252,13 @@ impl wgpu::Texture {
         encode_load_texture_from_image_buffer(device, encoder, usage, buffer)
     }
 
-    /// Encode the necessary commands to load a texture array directly from a sequence of image
+    /// Encode the necessary commands to load a 3d texture directly from a sequence of image
     /// buffers.
     ///
     /// NOTE: The returned texture will remain empty until the given `encoder` has its command buffer
     /// submitted to the given `device`'s queue.
+    ///
+    /// NOTE: The returned texture will be 3d; you must create
     ///
     /// No format or size conversions are performed - the given buffer is loaded directly into GPU
     /// memory.
@@ -261,7 +266,7 @@ impl wgpu::Texture {
     /// Pixel type compatibility is ensured via the `Pixel` trait.
     ///
     /// Returns `None` if there are no images in the given sequence.
-    pub fn encode_load_array_from_image_buffers<'a, I, P, Container>(
+    pub fn encode_load_3d_from_image_buffers<'a, I, P, Container>(
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         usage: wgpu::TextureUsage,
@@ -273,7 +278,7 @@ impl wgpu::Texture {
         P: 'static + Pixel,
         Container: 'a + std::ops::Deref<Target = [P::Subpixel]>,
     {
-        encode_load_texture_array_from_image_buffers(device, encoder, usage, buffers)
+        encode_load_3d_texture_from_image_buffers(device, encoder, usage, buffers)
     }
 
     /// Write the contents of the texture into a new image buffer.
@@ -294,7 +299,7 @@ impl wgpu::Texture {
     ) -> Option<BufferImage> {
         let color_type = image_color_type_from_format(self.format())?;
         let size = self.size();
-        let buffer = self.to_buffer_bytes(device, encoder);
+        let buffer = self.to_buffer(device, encoder);
         Some(BufferImage {
             color_type,
             size,
@@ -319,18 +324,20 @@ impl BufferImage {
     ///
     /// Note: The given callback will not be called until the memory is mapped and the device is
     /// polled. You should not rely on the callback being called immediately.
-    pub async fn read(&self) -> Result<ImageReadMapping, wgpu::BufferAsyncError> {
+    pub async fn read<'b>(&'b self) -> Result<ImageReadMapping<'b>, wgpu::BufferAsyncError> {
         let size = self.size;
         let color_type = self.color_type;
-        let mapping = self.buffer.read().await?;
+        let slice = self.buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read).await?;
         Ok(ImageReadMapping {
             color_type,
             size,
+            view: slice.get_mapped_range()
         })
     }
 }
 
-impl ImageReadMapping {
+impl <'b> ImageReadMapping<'b> {
     /// Produce the color type of an image, compatible with the `image` crate.
     pub fn color_type(&self) -> image::ColorType {
         self.color_type
@@ -342,8 +349,8 @@ impl ImageReadMapping {
     }
 
     /// The raw image data as a slice of bytes.
-    pub fn mapping(&self) -> &wgpu::ImageReadMapping {
-        &self.mapping
+    pub fn data(&self) -> &[u8] {
+        &self.view[..]
     }
 
     /// Saves the buffer to a file at the specified path.
@@ -351,7 +358,7 @@ impl ImageReadMapping {
     /// The image format is derived from the file extension.
     pub fn save(&self, path: &Path) -> image::ImageResult<()> {
         let [width, height] = self.size();
-        let data = self.mapping.as_slice();
+        let data = &self.view[..];
         image::save_buffer(path, data, width, height, self.color_type)
     }
 
@@ -364,7 +371,7 @@ impl ImageReadMapping {
         let [width, height] = self.size();
         image::save_buffer_with_format(
             path,
-            self.mapping.as_slice(),
+            &self.view[..],
             width,
             height,
             self.color_type,
@@ -554,7 +561,7 @@ pub fn load_texture_from_image(
     };
     let mut encoder = device.create_command_encoder(&cmd_encoder_desc);
     let texture = encode_load_texture_from_image(device, &mut encoder, usage, image);
-    queue.submit(&[encoder.finish()]);
+    queue.submit(std::iter::once(encoder.finish()));
     texture
 }
 
@@ -579,11 +586,11 @@ where
     };
     let mut encoder = device.create_command_encoder(&cmd_encoder_desc);
     let texture = encode_load_texture_from_image_buffer(device, &mut encoder, usage, buffer);
-    queue.submit(&[encoder.finish()]);
+    queue.submit(std::iter::once(encoder.finish()));
     texture
 }
 
-/// Load a texture array directly from a sequence of image buffers.
+/// Load a 3d texture directly from a sequence of image buffers.
 ///
 /// No format or size conversions are performed - the given buffer is loaded directly into GPU
 /// memory.
@@ -591,7 +598,7 @@ where
 /// Pixel type compatibility is ensured via the `Pixel` trait.
 ///
 /// Returns `None` if there are no images in the given sequence.
-pub fn load_texture_array_from_image_buffers<'a, I, P, Container>(
+pub fn load_3d_texture_from_image_buffers<'a, I, P, Container>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     usage: wgpu::TextureUsage,
@@ -604,12 +611,12 @@ where
     Container: 'a + std::ops::Deref<Target = [P::Subpixel]>,
 {
     let cmd_encoder_desc = wgpu::CommandEncoderDescriptor {
-        label: Some("nannou_load_texture_array_from_image_buffers"),
+        label: Some("nannou_load_3d_texture_from_image_buffers"),
     };
     let mut encoder = device.create_command_encoder(&cmd_encoder_desc);
     let texture =
-        encode_load_texture_array_from_image_buffers(device, &mut encoder, usage, buffers);
-    queue.submit(&[encoder.finish()]);
+        encode_load_3d_texture_from_image_buffers(device, &mut encoder, usage, buffers);
+    queue.submit(std::iter::once(encoder.finish()));
     texture
 }
 
@@ -686,7 +693,7 @@ where
     // has padding. Instead, should make some `Subpixel` trait that we can control and is only
     // guaranteed to be implemented for safe types.
     let subpixel_bytes = unsafe { wgpu::bytes::from_slice(subpixel_data) };
-    let buffer = device.create_buffer_with_data(subpixel_bytes, wgpu::BufferUsage::COPY_SRC);
+    let buffer = device.create_buffer_init(&BufferInitDescriptor{ label: None, contents: subpixel_bytes, usage: wgpu::BufferUsage::COPY_SRC });
 
     // Submit command for copying pixel data to the texture.
     let buffer_copy_view = texture.default_buffer_copy_view(&buffer);
@@ -700,8 +707,11 @@ where
 /// Encode the necessary commands to load a texture array directly from a sequence of image
 /// buffers.
 ///
-/// NOTE: The returned texture will remain empty until the given `encoder` has its command buffer
+/// NOTE: The returned texture will remain empty u29ntil the given `encoder` has its command buffer
 /// submitted to the given `device`'s queue.
+///
+/// NOTE: The returned texture will not be an array! It will be a 3d texture with a depth equal
+/// to the number of textures in the iterator. To get an array
 ///
 /// No format or size conversions are performed - the given buffer is loaded directly into GPU
 /// memory.
@@ -709,7 +719,7 @@ where
 /// Pixel type compatibility is ensured via the `Pixel` trait.
 ///
 /// Returns `None` if there are no images in the given sequence.
-pub fn encode_load_texture_array_from_image_buffers<'a, I, P, Container>(
+pub fn encode_load_3d_texture_from_image_buffers<'a, I, P, Container>(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     usage: wgpu::TextureUsage,
@@ -725,9 +735,11 @@ where
     let array_layers = buffers.len() as u32;
     let first_buffer = buffers.next()?;
 
+    let (width, height) = first_buffer.dimensions();
+
     // Build the texture ready to receive the data.
     let texture = wgpu::TextureBuilder::from_image_view(first_buffer)
-        .array_layer_count(array_layers)
+        .extent(Extent3d { width, height, depth: array_layers })
         .usage(wgpu::TextureBuilder::REQUIRED_IMAGE_TEXTURE_USAGE | usage)
         .build(device);
 
@@ -740,13 +752,16 @@ where
         // that has padding. Instead, should make some `Subpixel` trait that we can control and is
         // only guaranteed to be implemented for safe types.
         let subpixel_bytes = unsafe { wgpu::bytes::from_slice(subpixel_data) };
-        let buffer = device.create_buffer_with_data(subpixel_bytes, wgpu::BufferUsage::COPY_SRC);
+        let buffer = device.create_buffer_init(&BufferInitDescriptor { label: None, contents: subpixel_bytes, usage: wgpu::BufferUsage::COPY_SRC });
 
         // Submit command for copying pixel data to the texture.
         let buffer_copy_view = texture.default_buffer_copy_view(&buffer);
         let mut texture_copy_view = texture.default_copy_view();
-        texture_copy_view.array_layer = layer as u32;
-        let extent = texture.extent();
+
+        // TODO(jhg): verify this works correctly
+        texture_copy_view.origin = wgpu::Origin3d { x: 0, y: 0, z: layer as u32 };
+        let mut extent = texture.extent();
+        extent.depth = 1;
         encoder.copy_buffer_to_texture(buffer_copy_view, texture_copy_view, extent);
     }
 

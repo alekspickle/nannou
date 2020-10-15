@@ -148,14 +148,12 @@ impl LayoutBuilder {
                 binding: i as u32,
                 visibility,
                 ty,
-                // wgpu 0.5-0.6 TODO: reconsider in the future
-                // refer to [`BIndGroupLayoutEntry`]
-                count: 1,
+                count: None,
             };
             entries.push(layout_binding);
         }
         let descriptor = wgpu::BindGroupLayoutDescriptor {
-            label: Some("nannou"),
+            label: Some("nannou bind group layout"),
             entries: &entries,
         };
         device.create_bind_group_layout(&descriptor)
@@ -187,11 +185,7 @@ impl<'a> Builder<'a> {
         buffer: &'a wgpu::Buffer,
         range: std::ops::Range<wgpu::BufferAddress>,
     ) -> Self {
-        let resource = wgpu::BindingResource::Buffer(wgpu::BufferSlice {
-            buffer,
-            offset: range.start,
-            size: range.end - range.start,
-        });
+        let resource = wgpu::BindingResource::Buffer(buffer.slice(range));
         self.binding(resource)
     }
 
@@ -235,7 +229,7 @@ impl<'a> Builder<'a> {
             entries.push(binding);
         }
         let descriptor = wgpu::BindGroupDescriptor {
-            label: Some("nannou"),
+            label: Some("nannou bind group"),
             layout,
             entries: &entries,
         };
